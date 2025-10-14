@@ -1,12 +1,20 @@
 import streamlit as st
 import pandas as pd
 import io
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import re
 
 st.set_page_config(page_title="Convertisseur Excel", layout="wide")
-st.title("Convertisseur Excel Multi-Onglets")
+col1, col2 = st.columns([1, 2])
+with col1:
+    st.image("logo rdb.jpeg", width=160)  # Remplace "logo.png" par le chemin de ton logo
+
+with col2:
+    st.title("Moulinette Droits voisins")
 st.markdown("""
-Cette application permet de transformer votre fichier Excel source en quatre onglets :  
-**SPED**, **Playright**, **SwissPerf**, **SENA**.
+Cette application permet de transformer un répertoire source en quatre onglets :  
+**Spedidam**, **Playright**, **SwissPerf**, **SENA** et **AIE**.
 """)
 
 # Upload du fichier Excel
@@ -16,12 +24,60 @@ if uploaded_file:
     try:
         # Lecture du fichier Excel
         df_source = pd.read_excel(uploaded_file, header=1)
+        df_source = df_source.iloc[1:].copy()
+        df_source["YEAR OF RECORDING"] = df_source["YEAR OF RECORDING"].astype("Int64").astype(str)
+        
+        # 🔑 Paramètres API Spotify
+        SPOTIFY_CLIENT_ID = "ce1ba19136ac49f3a7a5bd678860c208"
+        SPOTIFY_CLIENT_SECRET = "f8aa18b0e75d400e92e6642cc24d594a"
 
-        # ------------------------- LOGIQUE SPED -------------------------
-        df_source["Duration (HH:MM:SS)"] = df_source["Duration (HH:MM:SS)"].astype(str)
-        df_source["Duration (HH:MM:SS)"] = df_source["Duration (HH:MM:SS)"].apply(
-            lambda x: str(int(x.split(":")[0])) + ":" + x.split(":")[1] if ":" in x else x
+        # Fonction UPC via Spotify
+        def isrc_to_upcs(isrc, sp):
+            try:
+                res = sp.search(q=f"isrc:{isrc}", type="track", limit=10)
+                tracks = res.get("tracks", {}).get("items", [])
+                upcs = set()
+                for track in tracks:
+                    album_id = track["album"]["id"]
+                    album = sp.album(album_id)
+                    upc = album.get("external_ids", {}).get("upc")
+                    if upc:
+                        upcs.add(upc)
+                return list(upcs)[0] if upcs else None
+            except Exception:
+                return None
+
+        if "ISRC CODE" not in df_source.columns:
+            raise ValueError("Le fichier Excel doit contenir une colonne 'ISRC CODE'.")
+
+        # 🧠 On prépare la colonne UPC vide pour le moment
+        df_source["upc"] = None
+
+        # 👉 Sélection des onglets à inclure
+        options = ["SPED", "Playright", "SwissPerf", "SENA", "AIE"]
+        selected_tabs = st.multiselect(
+            "✅ Choisissez les onglets à inclure dans l’export :",
+            options,
+            default=options,
+            key="export_tabs"  # clé unique
         )
+
+        bouton_export = st.button("🚀 Lancer la moulinette")
+
+        if bouton_export:
+            # 🔹 Si l’utilisateur veut l’onglet AIE → on contacte Spotify
+            if "AIE" in selected_tabs:
+                with st.spinner("Récupération des codes UPC via Spotify..."):
+                    sp = spotipy.Spotify(
+                        auth_manager=SpotifyClientCredentials(
+                            client_id=SPOTIFY_CLIENT_ID,
+                            client_secret=SPOTIFY_CLIENT_SECRET
+                        )
+                    )
+                    df_source["upc"] = df_source["ISRC CODE"].apply(
+                        lambda x: isrc_to_upcs(str(x).strip(), sp) if pd.notna(x) else None
+                    )
+
 
         #SPED
 
@@ -37,94 +93,138 @@ if uploaded_file:
         df_sped = pd.DataFrame()
 
         # Colonnes obligatoires
-        df_sped["Artiste représenté\nRepresented artist"] = df_source['Artiste représenté\nRepresented artist']
+        df_sped["Artiste représenté\nRepresented artist"] = df_source['ARTIST NAME']
 
-        df_sped['Pseudonyme\nStage Name'] = df_source['Pseudonyme\nStage Name']
+        df_sped['Pseudonyme\nStage Name'] = df_source["ALIAS"]
 
         # Premier instrument = premier mot des instruments
-        df_sped["Premier instrument\nFirst Function on the title"] = df_source["Instruments / Vocals"].apply(
+        df_sped["Premier instrument\nFirst Function on the title"] = df_source['INSTRUMENT(S) / VOCALS'].apply(
             lambda x: str(x).split(",")[0] if pd.notnull(x) else ""
         )
 
         # Autres instruments = tout sauf le premier (après la 1ère virgule)
-        df_sped["Autres instruments\nOther  Functions on the title"] = df_source["Instruments / Vocals"].apply(
+        df_sped["Autres instruments\nOther  Functions on the title"] = df_source['INSTRUMENT(S) / VOCALS'].apply(
             lambda x: ",".join([i.strip() for i in str(x).split(",")[1:]]) if pd.notnull(x) and "," in str(x) else ""
         )
 
-        # Statut Artiste Principal et Membre du groupe 
+        # 1️⃣ Statut Artiste Principal
         def is_main_artist_partial(row):
-            main = str(row.get("Main artist / group", "")).strip().lower()
-            pseudos = str(row.get("Pseudonyme\nStage Name", "")).strip().lower().split(";")
+            main = str(row.get("RELEASE ARTIST / GROUP", "")).strip().lower()
+            pseudos = str(row.get("ALIAS", "")).strip().lower().split(";")
             pseudos = [p.strip() for p in pseudos if p.strip()]
-            rep = str(row.get("Artiste représenté\nRepresented artist", "")).strip().lower()
-            
-            # Vérifie si au moins un pseudo ou l'artiste représenté est dans main
+            rep = str(row.get("ARTIST NAME", "")).strip().lower()
+            role = str(row.get("ROLE", "")).strip().upper()
+
+            # Si ROLE = FA → artiste principal
+            if role == "FA":
+                return "yes"
+
+            # Vérifie si au moins un pseudo ou le nom de l’artiste est dans le nom du groupe
             for p in pseudos + [rep]:
                 if p and p in main:
                     return "yes"
             return "no"
 
+
+        # Appliquer la fonction
         df_sped["Statut Artiste Principal\nMain artist\n(yes or no)"] = df_source.apply(is_main_artist_partial, axis=1)
 
 
-        # Membre du groupe (vide par défaut)
-        df_sped["Membre du groupe\nGroup member"] = ""
+        # 2️⃣ Nom de l'artiste principal : toujours le nom du groupe
+        df_sped["Nom de l'artiste principal\nName of Main Artist"] = df_source["RELEASE ARTIST / GROUP"]
 
-        # Nom de l'artiste principal
-        df_sped["Nom de l'artiste principal\nName of Main Artist"] = df_source["Main artist / group"]
 
-        # Nom du Groupe principal (vide par défaut)
-        df_sped["Nom du Groupe principal\nName of Main Group"] = ""
+        # 3️⃣ Nom du Groupe principal : seulement si ce n’est PAS un artiste principal
+        df_sped["Nom du Groupe principal\nName of Main Group"] = df_source["RELEASE ARTIST / GROUP"].where(
+            df_sped["Statut Artiste Principal\nMain artist\n(yes or no)"] == "no", ""
+        )
 
+
+        # 4️⃣ Membre du groupe : si ROLE = FA et que (ALIAS ou ARTIST NAME) ≠ RELEASE ARTIST / GROUP
+        def map_role_swissperf(row):
+            role = str(row.get("ROLE", "")).strip().upper()  # FA ou NFA
+            alias_field = str(row.get("ALIAS", "")).strip().lower()
+            artist = str(row.get("ARTIST NAME", "")).strip().lower()
+            group = str(row.get("RELEASE ARTIST / GROUP", "")).strip().lower()
+
+            # Si ROLE n’est pas valide
+            if role not in ["FA", "NFA"]:
+                return ""
+
+            # Nettoyage du nom du groupe pour faciliter la détection
+            # On supprime les mots typiques de featuring
+            group_clean = re.sub(r'\b(feat\.?|ft\.?|avec|and|&|,|;)\b', '/', group)
+            group_parts = [g.strip() for g in group_clean.split("/") if g.strip()]
+
+            # Prépare la liste de comparaison (artiste + alias)
+            aliases = [a.strip() for a in alias_field.split(";") if a.strip()]
+            all_names = [artist] + aliases
+
+            # 🔹 Si un des noms (artist ou alias) correspond à un des noms principaux → soliste
+            for name in all_names:
+                for g in group_parts:
+                    if g.startswith(name) or name in g:
+                        return f"{role}/S"
+
+            # 🔹 Sinon → membre d'une formation
+            return f"{role}/MF"
+
+        df_sped["Membre du groupe\nGroup member"] = df_source.apply(map_role_swissperf, axis=1)
         # Release Title = Release type
-        df_sped["Titre général\nRelease Title"] = df_source["Track title"]
+        df_sped["Titre général\nRelease Title"] = df_source["TRACK TITLE"]
 
         # Titre de l'enregistrement
-        df_sped["Titre de l'enregistrement\nTrack Title"] = df_source["Track title"]
+        df_sped["Titre de l'enregistrement\nTrack Title"] = df_source["TRACK TITLE"]
 
         # Durée en Heure, Minute, Seconde
-        # Gestion de la durée (simple)
+        # Création des colonnes de durée pour df_sped uniquement
         heures, minutes, secondes, durees = [], [], [], []
-        for duree in df_source["Duration (HH:MM:SS)"]:
+
+        for duree in df_source['Duration']:
             d = str(duree).strip()
-            durees.append(d)
+
+            # On ne modifie PAS df_source, juste la version pour df_sped
             if ":" in d:
                 parts = d.split(":")
-                if len(parts) == 3:   # HH:MM:SS
+                if len(parts) == 3:  # Déjà HH:MM:SS
                     h, m, s = parts
-                elif len(parts) == 2: # MM:SS
-                    h = "0"
-                    m, s = parts
+                elif len(parts) == 2:  # Format MM:SS ou M:SS
+                    h = "00"
+                    m = parts[0].zfill(2)
+                    s = parts[1].zfill(2)
                 else:
-                    h, m, s = "", "", ""
+                    h, m, s = "00", "00", "00"
             else:
-                h, m, s = "", "", ""
+                h, m, s = "00", "00", "00"
+
             heures.append(h)
             minutes.append(m)
             secondes.append(s)
+            durees.append(f"{h}:{m}:{s}")
 
+        # Appliquer uniquement sur df_sped
         df_sped["Durée\nDuration"] = durees
         df_sped["Heure\nHour"] = heures
         df_sped["Minute\nMinute"] = minutes
         df_sped["Seconde\nSecond"] = secondes
 
         # Producteur Original
-        df_sped["Producteur Original\nOriginal Record Label"] = df_source["Label name"]
+        df_sped["Producteur Original\nOriginal Record Label"] = df_source['LABEL NAME']
 
         # Nationalité du producteur d'origine
-        df_sped["Nationalité du producteur d'origine\nNationality of Producer"] = df_source["Label country"]
+        df_sped["Nationalité du producteur d'origine\nNationality of Producer"] = df_source['LABEL COUNTRY']
 
         # Pays d'enregistrement
-        df_sped["Pays d'enregistrement\nCountry of Recording"] = df_source["Country of recording"]
+        df_sped["Pays d'enregistrement\nCountry of Recording"] = df_source['COUNTRY OF RECORDING']
 
         # Date d'enregistrement (vide par défaut car on n'a que l'année)
-        df_sped["date d'enregistrement\ndate of recording\n(dd/mm/yyyy)"] = df_source["Year of recording"]
+        df_sped["date d'enregistrement\ndate of recording\n(dd/mm/yyyy)"] = df_source['YEAR OF RECORDING']
 
         # Année de première publication
-        df_sped["Année de première publication\nYear of first publication\n(dd/mm/yyyy)"] = df_source["Year of recording"]
+        df_sped["Année de première publication\nYear of first publication\n(dd/mm/yyyy)"] = df_source['YEAR OF RECORDING']
 
         #ISRC 
-        df_sped["ISRC"] = df_source['ISRC code']
+        df_sped["ISRC"] = df_source['ISRC CODE']
             
         colonnes_sped = [
             'Artiste représenté\nRepresented artist',
@@ -552,24 +652,27 @@ if uploaded_file:
         # Construire df_playright
         df_playright = pd.DataFrame()
 
+        # Construire df_playright
+        df_playright = pd.DataFrame()
+
         # Colonnes obligatoires
         df_playright["Results"] = ""  # vide par défaut
-        df_playright["PerformerName"] = df_source.get("Artiste représenté\nRepresented artist", "")
+        df_playright["PerformerName"] = df_source.get('ARTIST NAME', "")
         df_playright["AffiliationNumber"] = ""
-        df_playright["AlbumTitle"] = ""
-        df_playright["TitleTrack"] = df_source.get("Track title", "")
-        df_playright["MainArtist"] = df_source.get("Main artist / group", "")
-        df_playright["RecordingYear"] = df_source.get("Year of recording", "")
-        df_playright["ProductionName"] = df_source.get("Label name", "")
-        df_playright["CountryOfProduction"] = df_source.get("Label country", "")
-        df_playright["CountryOfMastering"] = df_source.get("Country of recording", "")
+        df_playright["AlbumTitle"] = df_source.get('ALBUM TITLE', "") 
+        df_playright["TitleTrack"] = df_source.get('TRACK TITLE', "")
+        df_playright["MainArtist"] = df_source.get('RELEASE ARTIST / GROUP', "")
+        df_playright["RecordingYear"] = df_source.get('YEAR OF RECORDING', "")
+        df_playright["ProductionName"] = df_source.get('LABEL NAME', "")
+        df_playright["CountryOfProduction"] = df_source.get('LABEL COUNTRY', "")
+        df_playright["CountryOfMastering"] = df_source.get('COUNTRY OF RECORDING', "")
 
         # PerformerRole : main artist / featured artist (logique partielle)
         def performer_role_partial(row):
-            main = str(row.get("Main artist / group", "")).strip().lower()
-            pseudos = str(row.get("Pseudonyme\nStage Name", "")).strip().lower().split(";")
+            main = str(row.get('RELEASE ARTIST / GROUP', "")).strip().lower()
+            pseudos = str(row.get('ALIAS', "")).strip().lower().split(";")
             pseudos = [p.strip() for p in pseudos if p.strip()]
-            rep = str(row.get("Artiste représenté\nRepresented artist", "")).strip().lower()
+            rep = str(row.get('ARTIST NAME', "")).strip().lower()
             for p in pseudos + [rep]:
                 if p and p in main:
                     return "Main Artist"
@@ -581,28 +684,49 @@ if uploaded_file:
             "FA": "A"    # contrat d'artiste
         }
 
-        df_playright["PerformerRole"] = df_source["ROLE (Featured artist / Non featured artist)"].apply(
+        df_playright["PerformerRole"] = df_source['ROLE'].apply(
             lambda x: role_map.get(str(x).strip(), "")
         )
 
         df_playright["PerformerRole2"] = ""  # vide par défaut
+        import unicodedata
 
-        # Instruments : découpe jusqu'à 5 instruments
+        # Normalisation du texte
+        def normalize_text(text):
+            if not text:
+                return ""
+            text = str(text).strip().lower()
+            text = unicodedata.normalize('NFD', text).encode('ascii', 'ignore').decode('utf-8')
+            return text
+
+        # Trouver la famille de l'instrument dans le dictionnaire
         def find_instrument_family(instr):
-            if not instr:
+            instr_norm = normalize_text(instr)
+            if not instr_norm:
                 return ""
             for family, instruments in instru_dict.items():
-                if instr.strip() in instruments:
-                    return family
+                for i in instruments:
+                    i_norm = normalize_text(i)
+                    # correspondance simple
+                    if instr_norm == i_norm or instr_norm in i_norm or i_norm in instr_norm:
+                        return family
             return ""  # si non trouvé
 
-        # Premier instrument
-        df_playright["Instruments"] = df_source["Instruments / Vocals"].apply(
-            lambda x: str(x).split(",")[0].strip() if pd.notnull(x) and str(x).strip() else ""
-        )
+        # Remplissage dynamique des colonnes Instruments et InstrumentType jusqu'à 5
+        max_instruments = 5
 
-        # Famille correspondante
-        df_playright["InstrumentType"] = df_playright["Instruments"].apply(find_instrument_family)
+        for idx, row in df_source.iterrows():
+            instruments = [x.strip() for x in str(row['INSTRUMENT(S) / VOCALS']).split(",") if x.strip()]
+            for i in range(max_instruments):
+                col_instr = f"Instruments{i+1}" if i > 0 else "Instruments"
+                col_type = f"InstrumentType{i+1}" if i > 0 else "InstrumentType"
+                if i < len(instruments):
+                    instr = instruments[i]
+                    df_playright.at[idx, col_instr] = instr
+                    df_playright.at[idx, col_type] = find_instrument_family(instr)
+                else:
+                    df_playright.at[idx, col_instr] = ""
+                    df_playright.at[idx, col_type] = ""
 
         # Colonnes dans l'ordre final
         colonnes_playright = [
@@ -619,6 +743,7 @@ if uploaded_file:
             if col not in df_playright.columns:
                 df_playright[col] = ""
 
+
         # Réordonner
         df_playright = df_playright[colonnes_playright]
 
@@ -626,44 +751,65 @@ if uploaded_file:
         df_swissperf = pd.DataFrame()
 
         # Titre (morceau/chanson/plage) = Track title
-        df_swissperf["Titre (morceau/chanson/plage)"] = df_source["Track title"]
+        df_swissperf["Titre (morceau/chanson/plage)"] = df_source['TRACK TITLE']
 
         # Interprète principal/formation = Main artist / group
-        df_swissperf["Interprète principal/formation"] = df_source["Main artist / group"]
+        df_swissperf["Interprète principal/formation"] = df_source['RELEASE ARTIST / GROUP']
 
         # Instrument(s) = Instruments / Vocals
-        df_swissperf["Instrument(s)"] = df_source["Instruments / Vocals"]
+        df_swissperf["Instrument(s)"] = df_source['INSTRUMENT(S) / VOCALS']
 
-        # Rôle(s)
-        def map_role(role):
-            role = str(role).strip().upper()
-            if role == "FA":
-                return "FA/S"     # Featured Artist → Soliste par défaut
-            elif role == "NFA":
-                return "NFA/MS"   # Non Featured Artist → Musician de studio par défaut
-            else:
-                return ""
 
-        df_swissperf["Rôle(s)\nFA/S, FA/CO, FA/MF\nou\nNFA/MS,  NFA/CS, NFA/MF\net/ou\nAP"] = (
-            df_source["ROLE (Featured artist / Non featured artist)"].apply(map_role)
-        )
+        def map_role_swissperf(row):
+            release_artists = str(row.get('RELEASE ARTIST / GROUP', "")).strip().lower()
+            artist_name = str(row.get('ARTIST NAME', "")).strip().lower()
+            aliases = [a.strip().lower() for a in str(row.get('ALIAS', "")).split(";") if a.strip()]
+            instrument = str(row.get('INSTRUMENT(S) / VOCALS', "")).strip().lower()
+            role_prefix = str(row.get('ROLE', "")).upper()  # FA ou NFA
+
+            first_artist = re.split(r'[&,]', release_artists)[0].strip()
+
+            # --- Cas Featured Artist ---
+            if role_prefix == "FA":
+                if first_artist == artist_name or first_artist in aliases:
+                    return "FA/S"
+                else:
+                    return "FA/MF"
+
+            # --- Cas Non-Featured Artist ---
+            elif role_prefix == "NFA":
+                if "vocal" in instrument or "voice" in instrument or "chant" in instrument:
+                    return "NFA/CS"  # chanteur de studio
+                else:
+                    return "NFA/MS"  # musicien de studio
+
+            # --- Par défaut ---
+            return ""
+
+        # Appliquer sur le DataFrame
+        df_swissperf["Rôle(s)\nFA/S, FA/CO, FA/MF\nou\nNFA/MS,  NFA/CS, NFA/MF\net/ou\nAP"] = df_source.apply(map_role_swissperf, axis=1)
+
+
+
+
+
         # Pays d'enregistrement
-        df_swissperf["Pays d'enregistrement"] = df_source["Country of recording"]
+        df_swissperf["Pays d'enregistrement"] = df_source['COUNTRY OF RECORDING']
 
         # Année d'enre-gistre-ment
-        df_swissperf["Année d'enre-gistre-ment"] = df_source["Year of recording"]
+        df_swissperf["Année d'enre-gistre-ment"] = df_source['YEAR OF RECORDING']
 
         # Pays de publication = Label country
-        df_swissperf["Pays de publication"] = df_source["Label country"]
+        df_swissperf["Pays de publication"] = df_source['LABEL COUNTRY']
 
         # Année de publica-tion = Year of recording (par défaut)
-        df_swissperf["Année de publica-tion"] = df_source["Year of recording"]
+        df_swissperf["Année de publica-tion"] = df_source['YEAR OF RECORDING']
 
         # Album = Release type
-        df_swissperf["Album"] = ""
+        df_swissperf["Album"] = df_source['ALBUM TITLE']
 
         # Label
-        df_swissperf["Label"] = df_source["Label name"]
+        df_swissperf["Label"] = df_source['LABEL NAME']
 
         # Justificatif (Obligation pour AP) = vide
         df_swissperf["Justifi-catif\n(Obliga-tion pour AP)"] = ""
@@ -685,7 +831,7 @@ if uploaded_file:
                 return f"{int(m)}:{s.zfill(2)}"
             return ""
 
-        df_swissperf["Durée d'enregistrement\nen min:sec"] = df_source["Duration (HH:MM:SS)"].apply(convert_duration)
+        df_swissperf["Durée d'enregistrement\nen min:sec"] = df_source['Duration'].apply(convert_duration)
 
         # Réordonner les colonnes
         colonnes_swissperf = [
@@ -777,6 +923,9 @@ if uploaded_file:
             "Tunisia": "TN",
             "Libya": "LY"
         }
+
+
+
         # Fonction simple pour normaliser la casse et les espaces
         def normalize_country_simple(name):
             if pd.isna(name):
@@ -786,6 +935,7 @@ if uploaded_file:
         # Normaliser le dictionnaire
         pays_codes_norm = {k.lower(): v for k, v in pays_codes.items()}
 
+
         # Créer le DataFrame de destination
         df_sena = pd.DataFrame()
 
@@ -793,35 +943,31 @@ if uploaded_file:
         df_sena['SENA_NUMBER*'] = ""  # vide par défaut
         # Colonne ROLE* : MA ou S
         def map_role_sena(row):
-            main = str(row.get("Main artist / group", "")).strip().lower()
-            pseudos = str(row.get("Pseudonyme\nStage Name", "")).strip().lower().split(";")
-            pseudos = [p.strip() for p in pseudos if p.strip()]
-            rep = str(row.get("Artiste représenté\nRepresented artist", "")).strip().lower()
-
-            # Vérifie si au moins un pseudo ou l'artiste représenté est dans main
-            for p in pseudos + [rep]:
-                if p and p in main:
-                    return "MA"
-            return "S"
-
+            role = str(row.get("ROLE", "")).strip().upper()
+            if role == "FA":
+                return "MA"  # Main Artist
+            elif role == "NFA":
+                return "S"   # Session / Supporting
+            else:
+                return ""
         df_sena['ROLE*'] = df_source.apply(map_role_sena, axis=1)
-        df_sena['ARTIST*'] = df_source['Main artist / group']
-        df_sena['TITLE*'] = df_source['Track title']
-        df_sena['VERSION'] = df_source['Track version (Radio Edit / Extended Mix / …)']
-        df_sena['ISRC'] = df_source['ISRC code']
+        df_sena['ARTIST*'] = df_source['RELEASE ARTIST / GROUP']
+        df_sena['TITLE*'] = df_source['TRACK TITLE']
+        df_sena['VERSION'] = df_source['Version']
+        df_sena['ISRC'] = df_source['ISRC CODE']
         df_sena['TRACKID'] = ""  # vide par défaut
 
         # Instruments
         # Instrument principal = premier instrument
-        df_sena['INSTRUMENTS'] = df_source['Instruments / Vocals'].apply(lambda x: str(x).split(",")[0] if pd.notnull(x) else "")
+        df_sena['INSTRUMENTS'] = df_source['INSTRUMENT(S) / VOCALS'].apply(lambda x: str(x).split(",")[0] if pd.notnull(x) else "")
         # Nombre d'instruments
-        df_sena['NO_OF_INSTRUMENTS'] = df_source['Instruments / Vocals'].apply(lambda x: len(str(x).split(",")) if pd.notnull(x) and str(x).strip() else 0)
+        df_sena['NO_OF_INSTRUMENTS'] = ""
 
         # Catégorie selon ROLE
         df_sena['CATEGORY*'] = "M"
 
         # Label et genre
-        df_sena['LABEL'] = df_source['Label name']
+        df_sena['LABEL'] = df_source['LABEL NAME']
         df_sena['GENRE*'] = "P"  # à remplir si disponible
         df_sena['COMPOSER'] = ""  # vide par défaut
 
@@ -840,20 +986,20 @@ if uploaded_file:
                 return f"{h}:{m}:{s}"
             return ""
 
-        df_sena['DURATION'] = df_source['Duration (HH:MM:SS)'].apply(convert_duration)
+        df_sena['DURATION'] = df_source['Duration'].apply(convert_duration)
 
         # Membres et albums
         df_sena['NO_BAND_MEMBERS*'] = ""  # à remplir si info disponible
-        df_sena['ALBUM_TITLE'] = df_source['Track title']  # ou Release Title si disponible
+        df_sena['ALBUM_TITLE'] = df_source['TRACK TITLE']  # ou Release Title si disponible
         df_sena['NO_ALBUM_TRACKS'] = ""  # vide
-        df_sena['RECORDING_YEAR*'] = df_source['Year of recording']
+        df_sena['RECORDING_YEAR*'] = df_source['YEAR OF RECORDING']
         # Map des colonnes
-        df_sena['RECORDING_COUNTRY'] = df_source['Country of recording'].map(pays_codes).fillna("")
-        df_sena['CTY_CODE_PRODUCER'] = df_source['Label country'].map(pays_codes).fillna("")
+        df_sena['RECORDING_COUNTRY'] = df_source['COUNTRY OF RECORDING'].map(pays_codes).fillna("")
+        df_sena['CTY_CODE_PRODUCER'] = df_source['LABEL COUNTRY'].map(pays_codes).fillna("")
 
 
-        df_sena['FIRST_RELEASE_YEAR*'] = df_source['Year of recording']
-        df_sena['PROOF_URL'] = df_source['PROOF (lien URL)']
+        df_sena['FIRST_RELEASE_YEAR*'] = df_source['YEAR OF RECORDING']
+        df_sena['PROOF_URL'] = df_source['PROOF ((URL link)']
 
         # Réordonner colonnes pour correspondre au format exact demandé
         df_sena = df_sena[['SENA_NUMBER*', 'ROLE*', 'ARTIST*', 'TITLE*', 'VERSION', 'ISRC', 'TRACKID',
@@ -862,23 +1008,171 @@ if uploaded_file:
                             'RECORDING_COUNTRY', 'FIRST_RELEASE_YEAR*', 'CTY_CODE_PRODUCER', 'PROOF_URL']]
 
 
-    
+
+
+        #AIE
+
+
+        # --- Colonnes dans le bon ordre ---
+        colonnes_aie = [
+            "Stage Name",
+            "Function",
+            "Featuring as a Session Musician (Y/N)",
+            "Total No. of Main Artists on Track",
+            "% Royalty Share",
+            "Track Title",
+            "Title Version (Video, Remix, Live, etc)",
+            "Main Artists (Separate with semi-colons '/')",
+            "Duration (hh24:mi:ss)",
+            'COUNTRY OF RECORDING',
+            "Original Release Year",
+            "Category",
+            "ISRC Code",
+            "Album Title",
+            "Type of Media",
+            "Catalogue Number",
+            "Country of Origin of the Label",
+            "Recording Year",
+            "Record Label"
+        ]
+        df_aie = pd.DataFrame()
+
+
+        # 1️⃣ Stage Name
+        df_aie["Stage Name"] = df_source['ALIAS']
+
+        # 2️⃣ Function = Premier instrument
+        df_aie["Function"] = df_source['INSTRUMENT(S) / VOCALS'].apply(
+            lambda x: str(x).split(",")[0].strip() if pd.notnull(x) else ""
+        )
+
+        # 3️⃣ Featuring as a Session Musician (Y/N)
+        df_aie["Featuring as a Session Musician (Y/N)"] = df_source["ROLE"].apply(
+            lambda x: "N" if str(x).upper() == "NFA" else ("Y" if str(x).upper() == "FA" else "")
+        )
+
+
+        # Remplacer séparateurs et nettoyer — version simple et robuste
+        def clean_main_artists_simple(val):
+            if pd.isna(val):
+                return ""
+            s = str(val)
+
+            # Remplacements simples (ordre non sensible)
+            replacements = [" feat ", "feat ", "feat." ,"featuring ", " & ", "&", " et ", "et", ",", ";"]
+            for r in replacements:
+                s = s.replace(r, "/")
+
+            # Remplacer doublons de slash éventuels et retirer espaces inutiles
+            while "//" in s:
+                s = s.replace("//", "/")
+            parts = [p.strip() for p in s.split("/") if p.strip()]
+            return "/".join(parts)
+
+        # Appliquer pour remplir la colonne "Main Artists"
+        df_aie["Main Artists (Separate with semi-colons '/')"] = df_source['RELEASE ARTIST / GROUP'].apply(clean_main_artists_simple)
+
+        # Compter le nombre d'artistes (séparés par '/')
+        def count_artists_simple(s):
+            if not s:
+                return 0
+            return len(s.split("/"))
+
+        df_aie["Total No. of Main Artists on Track"] = df_aie["Main Artists (Separate with semi-colons '/')"].apply(count_artists_simple)
+
+
+        # 5️⃣ % Royalty Share (vide par défaut)
+        df_aie["% Royalty Share"] = ""
+
+        # 6️⃣ Track Title
+        df_aie["Track Title"] = df_source['TRACK TITLE']
+
+        # 7️⃣ Title Version (Video, Remix, Live, etc) (vide)
+        df_aie["Title Version (Video, Remix, Live, etc)"] = ""
+
+        # 9️⃣ Duration (hh24:mi:ss)
+        df_aie["Duration (hh24:mi:ss)"] = df_source['Duration']
+
+        # 🔟 Country of Recording (avec conversion code pays si dispo)
+        def get_country_code(pays):
+            pays = str(pays).strip()
+            return pays_codes.get(pays, pays)
+
+        df_aie['COUNTRY OF RECORDING'] = df_source['COUNTRY OF RECORDING'].apply(get_country_code)
+
+        # 11️⃣ Original Release Year
+        df_aie["Original Release Year"] = df_source['YEAR OF RECORDING']
+
+        # 12️⃣ Category (toujours M)
+        df_aie["Category"] = ""
+
+        # 13️⃣ ISRC Code
+        df_aie["ISRC Code"] = df_source['ISRC CODE']
+
+        # 14️⃣ Album Title
+        df_aie["Album Title"] = df_source['ALBUM TITLE']
+
+        # 15️⃣ Type of Media
+        df_aie["Type of Media"] = df_source['RELEASE TYPE'] if 'RELEASE TYPE' in df_source.columns else ""
+
+        # 16️⃣ Catalogue Number (vide)
+        df_aie["Catalogue Number"] = df_source["upc"]
+
+        # 17️⃣ Country of Origin of the Label (code pays)
+        df_aie["Country of Origin of the Label"] = df_source['LABEL COUNTRY'].apply(get_country_code)
+
+        # 18️⃣ Recording Year
+        df_aie["Recording Year"] = df_source['YEAR OF RECORDING']
+
+        # 19️⃣ Record Label
+        df_aie["Record Label"] = df_source['LABEL NAME']
+
+        # --- Colonnes dans le bon ordre ---
+        colonnes_aie = [
+            "Stage Name",
+            "Function",
+            "Featuring as a Session Musician (Y/N)",
+            "Total No. of Main Artists on Track",
+            "% Royalty Share",
+            "Track Title",
+            "Title Version (Video, Remix, Live, etc)",
+            "Main Artists (Separate with semi-colons '/')",
+            "Duration (hh24:mi:ss)",
+            'COUNTRY OF RECORDING',
+            "Original Release Year",
+            "Category",
+            "ISRC Code",
+            "Album Title",
+            "Type of Media",
+            "Catalogue Number",
+            "Country of Origin of the Label",
+            "Recording Year",
+            "Record Label"
+        ]
+
+        df_aie = df_aie[colonnes_aie]
 
         # ------------------------- EXPORT EXCEL -------------------------
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            df_sped.to_excel(writer, sheet_name="SPED", index=False)
-            df_playright.to_excel(writer, sheet_name="Playright", index=False)
-            df_swissperf.to_excel(writer, sheet_name="SwissPerf", index=False)
-            df_sena.to_excel(writer, sheet_name="sena", index=False)
-        output.seek(0)
+            if "SPED" in selected_tabs:
+                df_sped.to_excel(writer, sheet_name="SPED", index=False)
+            if "Playright" in selected_tabs:
+                df_playright.to_excel(writer, sheet_name="Playright", index=False)
+            if "SwissPerf" in selected_tabs:
+                df_swissperf.to_excel(writer, sheet_name="SwissPerf", index=False)
+            if "SENA" in selected_tabs:
+                df_sena.to_excel(writer, sheet_name="SENA", index=False)
+            if "AIE" in selected_tabs:
+                df_aie.to_excel(writer,sheet_name="AIE", index=False)
+
 
         st.download_button(
-            label="Télécharger le fichier Excel généré",
-            data=output,
-            file_name="exports_multi_onglets.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        label="⬇️ Télécharger le fichier Excel",
+        data=output.getvalue(),
+        file_name="export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
         st.success("✅ Fichier prêt au téléchargement !")
 
