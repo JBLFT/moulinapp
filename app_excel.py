@@ -1,19 +1,172 @@
 import streamlit as st
 import pandas as pd
-import io
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import re
+from io import BytesIO
+import io
 
-st.set_page_config(page_title="Convertisseur Excel", layout="wide")
+
+st.set_page_config(page_title="Boite à outils RDB",  page_icon="🎵", layout="centered")
 col1, col2 = st.columns([1, 2])
 with col1:
-    st.image("logo rdb.jpeg", width=160)  # Remplace "logo.png" par le chemin de ton logo
+    st.image("logo rdb.jpeg", width=160)  
 
 with col2:
-    st.title("Moulinette Droits voisins")
+    st.title("Boite à outils RDB")
+
+# --- En-tête
+st.subheader("💿 Récupérer la Discographie")
+st.markdown("Saisir le nom d’un artiste pour exporter toute sa discographie (albums, singles, collaborations) au format Excel.")
+
+# --- Identifiants Spotify 
+SPOTIFY_CLIENT_ID = "ce1ba19136ac49f3a7a5bd678860c208"
+SPOTIFY_CLIENT_SECRET = "f8aa18b0e75d400e92e6642cc24d594a"
+
+# --- Connexion à l’API Spotify
+sp = spotipy.Spotify(
+    auth_manager=SpotifyClientCredentials(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET
+    )
+)
+
+# --- Fonctions utilitaires
+def ms_to_hhmmss(ms):
+    if ms is None:
+        return ""
+    total_seconds = ms // 1000
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    else:
+        return f"0:{minutes:02d}:{seconds:02d}"
+
+def artist_data_is_main(artist_id, artist_list):
+    return artist_list and artist_list[0]["id"] == artist_id
+
+def get_artist_discography_export(artist_name):
+    """
+    Récupère toute la discographie d'un artiste (incluant collaborations)
+    et retourne un DataFrame au format demandé.
+    """
+    results = sp.search(q=f"artist:{artist_name}", type="artist", limit=1)
+    items = results.get("artists", {}).get("items", [])
+    if not items:
+        print(f"❌ Aucun artiste trouvé pour '{artist_name}'.")
+        return None
+
+    artist = items[0]
+    artist_id = artist["id"]
+    print(f"🎵 Artiste trouvé : {artist['name']} (Spotify ID: {artist_id})")
+
+    albums = []
+    results = sp.artist_albums(artist_id=artist_id, album_type="album,single,compilation,appears_on")
+    albums.extend(results["items"])
+    while results["next"]:
+        results = sp.next(results)
+        albums.extend(results["items"])
+
+    seen = set()
+    unique_albums = []
+    for a in albums:
+        if a["id"] not in seen:
+            seen.add(a["id"])
+            unique_albums.append(a)
+
+    print(f"💿 {len(unique_albums)} albums/singles trouvés (incluant collaborations).")
+
+    all_rows = []
+    for i, album in enumerate(unique_albums, start=1):
+        print(f"→ Traitement {i}/{len(unique_albums)} : {album['name'][:50]}")
+
+        album_id = album["id"]
+        album_info = sp.album(album_id)
+        upc = str(album_info.get("external_ids", {}).get("upc"))
+        release_date = album_info.get("release_date", "")
+        album_type = album_info.get("album_type", "")
+        label = album_info.get("label", "")
+        album_url = album_info.get("external_urls", {}).get("spotify", "")
+
+        tracks = sp.album_tracks(album_id)
+        for track in tracks["items"]:
+            artist_names = [a["name"] for a in track["artists"]]
+            artist_ids = [a["id"] for a in track["artists"]]
+
+            if artist_id in artist_ids:
+                track_data = sp.track(track["id"])
+                duration = ms_to_hhmmss(track_data["duration_ms"])
+                isrc = track_data["external_ids"].get("isrc", "")
+                track_url = track_data.get("external_urls", {}).get("spotify", "")
+
+                role = "Main artist" if artist_data_is_main(artist_id, track["artists"]) else "Featured artist"
+
+                all_rows.append({
+                    'ARTIST NAME': "",
+                    'ALIAS': artist["name"],  
+                    'RELEASE ARTIST / GROUP': ", ".join(artist_names),
+                    'ALBUM TITLE': album["name"],
+                    'TRACK TITLE': track_data["name"],
+                    'Version': "",
+                    'ISRC CODE': isrc,
+                    'UPC': upc,  # 🆕 nouvelle colonne ici
+                    'Duration': duration,
+                    'LABEL NAME': label,
+                    'LABEL COUNTRY': "",
+                    'YEAR OF RECORDING': release_date[:4] if release_date else "",
+                    'COUNTRY OF RECORDING': "",
+                    'RELEASE FORMAT': "",
+                    'RELEASE TYPE': album_type.capitalize(),
+                    'ROLE': role,
+                    'INSTRUMENT(S) / VOCALS': "",
+                    'PROOF (URL link)': track_url or album_url,
+                })
+
+    # 🆕 Ajout de "UPC" dans la liste des colonnes
+    columns = ['ARTIST NAME', 'ALIAS', 'RELEASE ARTIST / GROUP', 'ALBUM TITLE', 
+               'TRACK TITLE', 'Version', 'ISRC CODE', 'Duration', 'LABEL NAME', 
+               'LABEL COUNTRY', 'YEAR OF RECORDING', 'COUNTRY OF RECORDING', 
+               'RELEASE FORMAT', 'RELEASE TYPE', 'ROLE', 'INSTRUMENT(S) / VOCALS', 
+               'PROOF (URL link)', 'UPC']
+
+    df = pd.DataFrame(all_rows, columns=columns)
+    print(f"✅ {len(df)} morceaux trouvés pour {artist['name']}.")
+    return df
+
+# --- Interface utilisateur
+artist_name = st.text_input("Nom de l’artiste :")
+
+if st.button("🎶 Rechercher et générer"):
+    if not artist_name.strip():
+        st.warning("Merci de saisir un nom d’artiste.")
+    else:
+        with st.spinner("Recherche en cours sur Spotify..."):
+            df = get_artist_discography_export(artist_name)
+
+        if df is not None:
+            st.success(f"✅ {len(df)} morceaux trouvés pour {artist_name} !")
+
+            # Affichage d’un aperçu
+            st.dataframe(df.head(10))
+
+            # Création du fichier Excel en mémoire
+            output = BytesIO()
+            df.to_excel(output, index=False)
+            output.seek(0)
+
+            st.download_button(
+                label="📥 Télécharger en Excel",
+                data=output,
+                file_name=f"{artist_name}_discography.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+# Suite  
+
+st.subheader("🎡​Moulinette Droits Voisins")
 st.markdown("""
-Cette application permet de transformer un répertoire source en quatre onglets :  
+Importer le répertoire source pour le convertir aux formats requis par:  
 **Spedidam**, **Playright**, **SwissPerf**, **SENA** et **AIE**.
 """)
 
@@ -23,35 +176,12 @@ uploaded_file = st.file_uploader("Choisissez un fichier Excel source", type=["xl
 if uploaded_file:
     try:
         # Lecture du fichier Excel
-        df_source = pd.read_excel(uploaded_file, header=1)
-        df_source = df_source.iloc[1:].copy()
+        df_source = pd.read_excel(uploaded_file, header=0)
         df_source["YEAR OF RECORDING"] = df_source["YEAR OF RECORDING"].astype("Int64").astype(str)
         
         # 🔑 Paramètres API Spotify
         SPOTIFY_CLIENT_ID = "ce1ba19136ac49f3a7a5bd678860c208"
         SPOTIFY_CLIENT_SECRET = "f8aa18b0e75d400e92e6642cc24d594a"
-
-        # Fonction UPC via Spotify
-        def isrc_to_upcs(isrc, sp):
-            try:
-                res = sp.search(q=f"isrc:{isrc}", type="track", limit=10)
-                tracks = res.get("tracks", {}).get("items", [])
-                upcs = set()
-                for track in tracks:
-                    album_id = track["album"]["id"]
-                    album = sp.album(album_id)
-                    upc = album.get("external_ids", {}).get("upc")
-                    if upc:
-                        upcs.add(upc)
-                return list(upcs)[0] if upcs else None
-            except Exception:
-                return None
-
-        if "ISRC CODE" not in df_source.columns:
-            raise ValueError("Le fichier Excel doit contenir une colonne 'ISRC CODE'.")
-
-        # 🧠 On prépare la colonne UPC vide pour le moment
-        df_source["upc"] = None
 
         # 👉 Sélection des onglets à inclure
         options = ["SPED", "Playright", "SwissPerf", "SENA", "AIE"]
@@ -61,23 +191,6 @@ if uploaded_file:
             default=options,
             key="export_tabs"  # clé unique
         )
-
-        bouton_export = st.button("🚀 Lancer la moulinette")
-
-        if bouton_export:
-            # 🔹 Si l’utilisateur veut l’onglet AIE → on contacte Spotify
-            if "AIE" in selected_tabs:
-                with st.spinner("Récupération des codes UPC via Spotify..."):
-                    sp = spotipy.Spotify(
-                        auth_manager=SpotifyClientCredentials(
-                            client_id=SPOTIFY_CLIENT_ID,
-                            client_secret=SPOTIFY_CLIENT_SECRET
-                        )
-                    )
-                    df_source["upc"] = df_source["ISRC CODE"].apply(
-                        lambda x: isrc_to_upcs(str(x).strip(), sp) if pd.notna(x) else None
-                    )
-
 
         #SPED
 
@@ -999,7 +1112,7 @@ if uploaded_file:
 
 
         df_sena['FIRST_RELEASE_YEAR*'] = df_source['YEAR OF RECORDING']
-        df_sena['PROOF_URL'] = df_source['PROOF ((URL link)']
+        df_sena['PROOF_URL'] = df_source['PROOF (URL link)']
 
         # Réordonner colonnes pour correspondre au format exact demandé
         df_sena = df_sena[['SENA_NUMBER*', 'ROLE*', 'ARTIST*', 'TITLE*', 'VERSION', 'ISRC', 'TRACKID',
@@ -1116,7 +1229,7 @@ if uploaded_file:
         df_aie["Type of Media"] = df_source['RELEASE TYPE'] if 'RELEASE TYPE' in df_source.columns else ""
 
         # 16️⃣ Catalogue Number (vide)
-        df_aie["Catalogue Number"] = df_source["upc"]
+        df_aie["Catalogue Number"] = df_source["UPC"].astype("string")
 
         # 17️⃣ Country of Origin of the Label (code pays)
         df_aie["Country of Origin of the Label"] = df_source['LABEL COUNTRY'].apply(get_country_code)
