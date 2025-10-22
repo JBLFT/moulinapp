@@ -52,6 +52,8 @@ def get_artist_discography_export(artist_name):
     Récupère toute la discographie d'un artiste (incluant collaborations)
     et retourne un DataFrame au format demandé.
     """
+
+    
     results = sp.search(q=f"artist:{artist_name}", type="artist", limit=1)
     items = results.get("artists", {}).get("items", [])
     if not items:
@@ -137,12 +139,24 @@ def get_artist_discography_export(artist_name):
 
 # --- Interface utilisateur
 artist_name = st.text_input("Nom de l’artiste :")
+artist_id_input = st.text_input("Ou ID Spotify de l’artiste (optionnel) :", 
+                                placeholder="Ex : 5KQuLhckFhcox1K9UCgLuV")
 
 if st.button("🎶 Rechercher et générer"):
-    if not artist_name.strip():
-        st.warning("Merci de saisir un nom d’artiste.")
+    if not artist_name.strip() and not artist_id_input.strip():
+        st.warning("Merci de saisir un nom ou un ID Spotify d’artiste.")
     else:
         with st.spinner("Recherche en cours sur Spotify..."):
+            # --- Si un ID Spotify est fourni, on l’utilise directement
+            if artist_id_input.strip():
+                try:
+                    artist = sp.artist(artist_id_input.strip())
+                    artist_name = artist["name"]
+                    st.info(f"🎵 Artiste trouvé via ID : **{artist_name}**")
+                except Exception as e:
+                    st.error("❌ ID Spotify invalide ou non trouvé.")
+                    st.stop()
+
             df = get_artist_discography_export(artist_name)
 
         if df is not None:
@@ -162,6 +176,7 @@ if st.button("🎶 Rechercher et générer"):
                 file_name=f"{artist_name}_discography.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
 # Suite  
 
 st.subheader("🎡​Moulinette Droits Voisins")
