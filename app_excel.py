@@ -149,7 +149,7 @@ def get_artist_discography_export(artist_name=None, artist_id=None):
 
 # --- Interface utilisateur
 artist_name = st.text_input("Nom de l’artiste :")
-artist_id_input = st.text_input("Ou ID Spotify de l’artiste (optionnel) :", 
+artist_id_input = st.text_input("Ou ID Spotify de l’artiste :", 
                                 placeholder="Ex : 5KQuLhckFhcox1K9UCgLuV")
 
 if st.button("🎶 Rechercher et générer"):
