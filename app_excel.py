@@ -46,6 +46,7 @@ def ms_to_hhmmss(ms):
 
 def artist_data_is_main(artist_id, artist_list):
     return artist_list and artist_list[0]["id"] == artist_id
+
 def get_artist_discography_export(artist_name=None, artist_id=None):
     """
     Récupère toute la discographie d'un artiste (incluant collaborations)
@@ -157,25 +158,25 @@ if st.button("🎶 Rechercher et générer"):
         st.warning("Merci de saisir un nom ou un ID Spotify d’artiste.")
     else:
         with st.spinner("Recherche en cours sur Spotify..."):
-            # --- Si un ID Spotify est fourni, on l’utilise directement
             if artist_id_input.strip():
+                # 🔹 Si l'utilisateur donne un ID Spotify, on l'utilise directement
                 try:
                     artist = sp.artist(artist_id_input.strip())
                     artist_name = artist["name"]
                     st.info(f"🎵 Artiste trouvé via ID : **{artist_name}**")
-                except Exception as e:
+                    df = get_artist_discography_export(artist_id=artist_id_input.strip())
+                except Exception:
                     st.error("❌ ID Spotify invalide ou non trouvé.")
                     st.stop()
-
-            df = get_artist_discography_export(artist_name)
+            else:
+                # 🔹 Sinon, recherche classique par nom
+                df = get_artist_discography_export(artist_name=artist_name.strip())
 
         if df is not None:
             st.success(f"✅ {len(df)} morceaux trouvés pour {artist_name} !")
 
-            # Affichage d’un aperçu
             st.dataframe(df.head(10))
 
-            # Création du fichier Excel en mémoire
             output = BytesIO()
             df.to_excel(output, index=False)
             output.seek(0)
