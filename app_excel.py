@@ -46,24 +46,31 @@ def ms_to_hhmmss(ms):
 
 def artist_data_is_main(artist_id, artist_list):
     return artist_list and artist_list[0]["id"] == artist_id
-
-def get_artist_discography_export(artist_name):
+def get_artist_discography_export(artist_name=None, artist_id=None):
     """
     Récupère toute la discographie d'un artiste (incluant collaborations)
     et retourne un DataFrame au format demandé.
     """
 
-    
-    results = sp.search(q=f"artist:{artist_name}", type="artist", limit=1)
-    items = results.get("artists", {}).get("items", [])
-    if not items:
-        print(f"❌ Aucun artiste trouvé pour '{artist_name}'.")
-        return None
+    # --- Si on a un artist_id, on l'utilise directement
+    if artist_id:
+        try:
+            artist = sp.artist(artist_id)
+        except Exception as e:
+            print(f"❌ ID Spotify invalide ou non trouvé : {artist_id}")
+            return None
+    else:
+        results = sp.search(q=f"artist:{artist_name}", type="artist", limit=1)
+        items = results.get("artists", {}).get("items", [])
+        if not items:
+            print(f"❌ Aucun artiste trouvé pour '{artist_name}'.")
+            return None
+        artist = items[0]
+        artist_id = artist["id"]
 
-    artist = items[0]
-    artist_id = artist["id"]
     print(f"🎵 Artiste trouvé : {artist['name']} (Spotify ID: {artist_id})")
 
+    # --- Récupération de tous les albums de cet artiste
     albums = []
     results = sp.artist_albums(artist_id=artist_id, album_type="album,single,compilation,appears_on")
     albums.extend(results["items"])
@@ -71,6 +78,7 @@ def get_artist_discography_export(artist_name):
         results = sp.next(results)
         albums.extend(results["items"])
 
+    # --- Suppression des doublons
     seen = set()
     unique_albums = []
     for a in albums:
@@ -80,6 +88,7 @@ def get_artist_discography_export(artist_name):
 
     print(f"💿 {len(unique_albums)} albums/singles trouvés (incluant collaborations).")
 
+    # --- Boucle sur tous les albums
     all_rows = []
     for i, album in enumerate(unique_albums, start=1):
         print(f"→ Traitement {i}/{len(unique_albums)} : {album['name'][:50]}")
@@ -94,39 +103,40 @@ def get_artist_discography_export(artist_name):
 
         tracks = sp.album_tracks(album_id)
         for track in tracks["items"]:
-            artist_names = [a["name"] for a in track["artists"]]
             artist_ids = [a["id"] for a in track["artists"]]
+            artist_names = [a["name"] for a in track["artists"]]
 
-            if artist_id in artist_ids:
-                track_data = sp.track(track["id"])
-                duration = ms_to_hhmmss(track_data["duration_ms"])
-                isrc = track_data["external_ids"].get("isrc", "")
-                track_url = track_data.get("external_urls", {}).get("spotify", "")
+            # 🔥 Filtre strict : seulement les morceaux où l’artiste ID correspond exactement
+            if artist_id not in artist_ids:
+                continue
 
-                role = "Main artist" if artist_data_is_main(artist_id, track["artists"]) else "Featured artist"
+            track_data = sp.track(track["id"])
+            duration = ms_to_hhmmss(track_data["duration_ms"])
+            isrc = track_data["external_ids"].get("isrc", "")
+            track_url = track_data.get("external_urls", {}).get("spotify", "")
+            role = "Main artist" if artist_data_is_main(artist_id, track["artists"]) else "Featured artist"
 
-                all_rows.append({
-                    'ARTIST NAME': "",
-                    'ALIAS': artist["name"],  
-                    'RELEASE ARTIST / GROUP': ", ".join(artist_names),
-                    'ALBUM TITLE': album["name"],
-                    'TRACK TITLE': track_data["name"],
-                    'Version': "",
-                    'ISRC CODE': isrc,
-                    'UPC': upc,  # 🆕 nouvelle colonne ici
-                    'Duration': duration,
-                    'LABEL NAME': label,
-                    'LABEL COUNTRY': "",
-                    'YEAR OF RECORDING': release_date[:4] if release_date else "",
-                    'COUNTRY OF RECORDING': "",
-                    'RELEASE FORMAT': "",
-                    'RELEASE TYPE': album_type.capitalize(),
-                    'ROLE': role,
-                    'INSTRUMENT(S) / VOCALS': "",
-                    'PROOF (URL link)': track_url or album_url,
-                })
+            all_rows.append({
+                'ARTIST NAME': "",
+                'ALIAS': artist["name"],  
+                'RELEASE ARTIST / GROUP': ", ".join(artist_names),
+                'ALBUM TITLE': album["name"],
+                'TRACK TITLE': track_data["name"],
+                'Version': "",
+                'ISRC CODE': isrc,
+                'UPC': upc,
+                'Duration': duration,
+                'LABEL NAME': label,
+                'LABEL COUNTRY': "",
+                'YEAR OF RECORDING': release_date[:4] if release_date else "",
+                'COUNTRY OF RECORDING': "",
+                'RELEASE FORMAT': "",
+                'RELEASE TYPE': album_type.capitalize(),
+                'ROLE': role,
+                'INSTRUMENT(S) / VOCALS': "",
+                'PROOF (URL link)': track_url or album_url,
+            })
 
-    # 🆕 Ajout de "UPC" dans la liste des colonnes
     columns = ['ARTIST NAME', 'ALIAS', 'RELEASE ARTIST / GROUP', 'ALBUM TITLE', 
                'TRACK TITLE', 'Version', 'ISRC CODE', 'Duration', 'LABEL NAME', 
                'LABEL COUNTRY', 'YEAR OF RECORDING', 'COUNTRY OF RECORDING', 
