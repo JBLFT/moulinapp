@@ -5,6 +5,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import re
 from io import BytesIO
 import io
+import json
 
 
 st.set_page_config(page_title="Boite à outils RDB",  page_icon="🎵", layout="centered")
@@ -23,13 +24,11 @@ st.markdown("Saisir le nom d’un artiste pour exporter toute sa discographie (a
 SPOTIFY_CLIENT_ID = "ce1ba19136ac49f3a7a5bd678860c208"
 SPOTIFY_CLIENT_SECRET = "f8aa18b0e75d400e92e6642cc24d594a"
 
-# --- Connexion à l’API Spotify
-sp = spotipy.Spotify(
-    auth_manager=SpotifyClientCredentials(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET
-    )
-)
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+    client_id=st.secrets["SPOTIFY_CLIENT_ID"],
+    client_secret=st.secrets["SPOTIFY_CLIENT_SECRET"]
+))
+
 
 # --- Fonctions utilitaires
 def ms_to_hhmmss(ms):
@@ -193,7 +192,7 @@ if st.button("🎶 Rechercher et générer"):
 st.subheader("🎡​Moulinette Droits Voisins")
 st.markdown("""
 Importer le répertoire source pour le convertir aux formats requis par:  
-**Spedidam**, **Playright**, **SwissPerf**, **SENA** et **AIE**.
+**Spedidam**, **Playright**, **SwissPerf**, **SENA**, **AIE** et **Artisti**.
 """)
 
 # Upload du fichier Excel
@@ -210,7 +209,7 @@ if uploaded_file:
         SPOTIFY_CLIENT_SECRET = "f8aa18b0e75d400e92e6642cc24d594a"
 
         # 👉 Sélection des onglets à inclure
-        options = ["SPED", "Playright", "SwissPerf", "SENA", "AIE"]
+        options = ["SPED", "Playright", "SwissPerf", "SENA", "AIE", "Artisti"]
         selected_tabs = st.multiselect(
             "✅ Choisissez les onglets à inclure dans l’export :",
             options,
@@ -310,7 +309,7 @@ if uploaded_file:
 
         df_sped["Membre du groupe\nGroup member"] = df_source.apply(map_role_swissperf, axis=1)
         # Release Title = Release type
-        df_sped["Titre général\nRelease Title"] = df_source["TRACK TITLE"]
+        df_sped["Titre général\nRelease Title"] = df_source["ALBUM TITLE"]
 
         # Titre de l'enregistrement
         df_sped["Titre de l'enregistrement\nTrack Title"] = df_source["TRACK TITLE"]
@@ -1291,6 +1290,64 @@ if uploaded_file:
 
         df_aie = df_aie[colonnes_aie]
 
+        # Artisti
+
+        df_artisti = pd.DataFrame()
+
+        # 1️⃣ Mapping des colonnes
+        df_artisti["Album Title"] = df_source["ALBUM TITLE"]
+        df_artisti["Album Artist"] = df_source["RELEASE ARTIST / GROUP"]
+        df_artisti["Track Number"] = ""  # Pas dans df_source
+        df_artisti["Track Title"] = df_source["TRACK TITLE"]
+        df_artisti["Track Version"] = df_source["Version"]
+        df_artisti["Track Main Artist"] = df_source["ARTIST NAME"]
+        df_artisti["ISRC"] = df_source["ISRC CODE"]
+        df_artisti["Agent Track ID"] = ""  # Si tu as un ID interne, tu peux le mettre ici
+        df_artisti["First Maker Name(s)"] = ""
+        df_artisti["First Maker Nationality(ies)"] = df_source["LABEL COUNTRY"]
+        df_artisti[" Country of Fixation"] = df_source["COUNTRY OF RECORDING"]
+
+        # Conversion des années
+        df_artisti["Year of Fixation"] = df_source["YEAR OF RECORDING"].apply(
+            lambda x: str(int(x)) if pd.notnull(x) and str(x).strip() else ""
+        )
+        df_artisti["Year of Release"] = df_artisti["Year of Fixation"]  # même valeur si pas de champ séparé
+
+        df_artisti["Label"] = df_source["LABEL NAME"]
+        df_artisti["Media Type"] = df_source["RELEASE FORMAT"]
+        df_artisti[" UPC Number"] = df_source["UPC"]
+        df_artisti["Catalog Number"] = ""  # pas dans df_source
+        df_artisti["Genre"] = df_source["RELEASE TYPE"]
+        df_artisti["Track Duration "] = df_source["Duration"]
+        df_artisti["Composer"] = ""  # pas dans df_source
+        df_artisti["Track Proof"] = df_source["PROOF (URL link)"]
+
+        # 2️⃣ Réordonner les colonnes selon la structure Artisti
+        artisti_cols = [
+            'Album Title',
+            'Album Artist',
+            'Track Number',
+            'Track Title',
+            'Track Version',
+            'Track Main Artist',
+            'ISRC',
+            'Agent Track ID',
+            'First Maker Name(s)',
+            'First Maker Nationality(ies)',
+            ' Country of Fixation',
+            'Year of Fixation',
+            'Year of Release',
+            'Label',
+            'Media Type',
+            ' UPC Number',
+            'Catalog Number',
+            'Genre',
+            'Track Duration ',
+            'Composer',
+            'Track Proof'
+        ]
+        df_artisti = df_artisti[artisti_cols]
+
         # ------------------------- EXPORT EXCEL -------------------------
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -1304,7 +1361,8 @@ if uploaded_file:
                 df_sena.to_excel(writer, sheet_name="SENA", index=False)
             if "AIE" in selected_tabs:
                 df_aie.to_excel(writer,sheet_name="AIE", index=False)
-
+            if "Artisti" in selected_tabs:
+                df_artisti.to_excel(writer, sheet_name="Artisti", index=False)
 
         st.download_button(
         label="⬇️ Télécharger le fichier Excel",
