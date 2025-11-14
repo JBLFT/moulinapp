@@ -106,7 +106,7 @@ def get_artist_discography_export(artist_name=None, artist_id=None):
             artist_ids = [a["id"] for a in track["artists"]]
             artist_names = [a["name"] for a in track["artists"]]
 
-            # 🔥 Filtre strict : seulement les morceaux où l’artiste ID correspond exactement
+            # Filtre strict : seulement les morceaux où l’artiste ID correspond exactement
             if artist_id not in artist_ids:
                 continue
 
@@ -141,7 +141,7 @@ def get_artist_discography_export(artist_name=None, artist_id=None):
                'TRACK TITLE', 'Version', 'ISRC CODE', 'Duration', 'LABEL NAME', 
                'LABEL COUNTRY', 'YEAR OF RECORDING', 'COUNTRY OF RECORDING', 
                'RELEASE FORMAT', 'RELEASE TYPE', 'ROLE', 'INSTRUMENT(S) / VOCALS', 
-               'PROOF (URL link)', 'UPC']
+               'PROOF (URL link)', 'UPC','ROYALTY SHARE']
 
     df = pd.DataFrame(all_rows, columns=columns)
     print(f"✅ {len(df)} morceaux trouvés pour {artist['name']}.")
@@ -1220,7 +1220,7 @@ if uploaded_file:
 
 
         # 5️⃣ % Royalty Share (vide par défaut)
-        df_aie["% Royalty Share"] = ""
+        df_aie["% Royalty Share"] = df_source['ROYALTY SHARE']
 
         # 6️⃣ Track Title
         df_aie["Track Title"] = df_source['TRACK TITLE']
@@ -1251,7 +1251,7 @@ if uploaded_file:
         df_aie["Album Title"] = df_source['ALBUM TITLE']
 
         # 15️⃣ Type of Media
-        df_aie["Type of Media"] = df_source['RELEASE TYPE'] if 'RELEASE TYPE' in df_source.columns else ""
+        df_aie["Type of Media"] = ""
 
         # 16️⃣ Catalogue Number (vide)
         df_aie["Catalogue Number"] = df_source["UPC"].astype("string")
