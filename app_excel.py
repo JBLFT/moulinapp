@@ -1128,7 +1128,7 @@ if uploaded_file:
 
         # Membres et albums
         df_sena['NO_BAND_MEMBERS*'] = ""  # à remplir si info disponible
-        df_sena['ALBUM_TITLE'] = df_source['TRACK TITLE']  # ou Release Title si disponible
+        df_sena['ALBUM_TITLE'] = df_source['ALBUM TITLE'] 
         df_sena['NO_ALBUM_TRACKS'] = ""  # vide
         df_sena['RECORDING_YEAR*'] = df_source['YEAR OF RECORDING']
         # Map des colonnes
@@ -1375,3 +1375,4 @@ if uploaded_file:
 
     except Exception as e:
         st.error(f"Une erreur est survenue : {str(e)}")
+
