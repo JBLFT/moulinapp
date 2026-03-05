@@ -209,7 +209,7 @@ if uploaded_file:
         SPOTIFY_CLIENT_SECRET = "f8aa18b0e75d400e92e6642cc24d594a"
 
         # 👉 Sélection des onglets à inclure
-        options = ["SPED", "Playright", "SwissPerf", "SENA", "AIE", "Artisti"]
+        options = ["SPED", "Playright", "SwissPerf", "SENA", "AIE", "Artisti", "Artisti_2"]
         selected_tabs = st.multiselect(
             "✅ Choisissez les onglets à inclure dans l’export :",
             options,
@@ -1348,6 +1348,58 @@ if uploaded_file:
         ]
         df_artisti = df_artisti[artisti_cols]
 
+        #ARTISTI_2
+
+        df_artisti_2 = pd.DataFrame()
+
+        df_artisti_2["Track Number"] = ""  # Pas dans df_source
+        df_artisti_2["Track Title"] = df_source["TRACK TITLE"]
+        df_artisti_2["Track Version"] = df_source["Version"]
+        df_artisti_2["Track Main Artist"] = df_source["ARTIST NAME"]
+        df_artisti_2["ISRC"] = df_source["ISRC CODE"]
+        df_artisti_2["Agent Track ID"] = ""  # Si tu as un ID interne, tu peux le mettre ici
+        df_artisti_2["Performer First Name"] = df_source["ARTIST NAME"].apply(lambda x: str(x).split()[0] if pd.notnull(x) and str(x).strip() else "")
+        df_artisti_2["Performer Last Name"] = df_source["ARTIST NAME"].apply(lambda x: " ".join(str(x).split()[1:]) if pd.notnull(x) and str(x).strip() else "")
+        df_artisti_2["Performer Date Of Birth"] = ""  # pas dans df_source
+        df_artisti_2["Performer IPN"] = ""  # pas dans df_source
+        df_artisti_2["Performer Citizenship"] = ""
+        df_artisti_2[" Stage First Name"] = ""
+        df_artisti_2[" Stage Last Name"] = ""
+        df_artisti_2["Artisti Performer ID "] = ""  # pas dans df_source
+        df_artisti_2["Agent Performer ID "] = ""  # pas dans df_source 
+        df_artisti_2["Performer Category"] = df_source["ROLE"]
+        df_artisti_2["Role"] = df_source["INSTRUMENT(S) / VOCALS"].apply(
+            lambda x: "vocalist" if pd.notnull(x) and "vocal" in str(x).lower() else "instrumentalist"
+        )
+        df_artisti_2["Instruments"] = df_source["INSTRUMENT(S) / VOCALS"]
+        df_artisti_2["Total No. Of Featured Artists (leave blank if unknown)"] = ""  # à remplir si info disponible
+        df_artisti_2["Total No. Of Non-Featured Artists (leave blank if unknown)"] = ""  # à remplir si info disponible
+
+
+        artisti_cols_2 = ['Track Number',
+        'Track Title',
+        'Track Version',
+        'Track Main Artist',
+        'ISRC',
+        'Agent Track ID',
+        'Performer First Name',
+        'Performer Last Name',
+        'Performer Date Of Birth',
+        'Performer IPN',
+        'Performer Citizenship',
+        ' Stage First Name',
+        ' Stage Last Name',
+        'Artisti Performer ID ',
+        'Agent Performer ID ',
+        'Performer Category',
+        'Role',
+        'Instruments',
+        'Total No. Of Featured Artists (leave blank if unknown)',
+        'Total No. Of Non-Featured Artists (leave blank if unknown)']
+
+        df_artisti_2 = df_artisti_2[artisti_cols_2]
+
+
         # ------------------------- EXPORT EXCEL -------------------------
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -1363,6 +1415,8 @@ if uploaded_file:
                 df_aie.to_excel(writer,sheet_name="AIE", index=False)
             if "Artisti" in selected_tabs:
                 df_artisti.to_excel(writer, sheet_name="Artisti", index=False)
+            if "Artisti_2" in selected_tabs:
+                df_artisti_2.to_excel(writer, sheet_name="Artisti_2", index=False)
 
         st.download_button(
         label="⬇️ Télécharger le fichier Excel",
@@ -1375,4 +1429,3 @@ if uploaded_file:
 
     except Exception as e:
         st.error(f"Une erreur est survenue : {str(e)}")
-
