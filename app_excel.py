@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
+import requests
 import re
 from io import BytesIO
 import io
 import json
+import time
 
 
 st.set_page_config(page_title="Boite à outils RDB",  page_icon="🎵", layout="centered")
@@ -18,33 +18,60 @@ with col2:
 
 # --- En-tête
 st.subheader("💿 Récupérer la Discographie")
-st.markdown("Saisir le nom d’un artiste pour exporter toute sa discographie (albums, singles, collaborations) au format Excel.")
+st.markdown("Saisir le nom d'un artiste pour exporter toute sa discographie (albums, singles, collaborations) au format Excel.")
 
-# --- Identifiants Spotify 
-SPOTIFY_CLIENT_ID = "ce1ba19136ac49f3a7a5bd678860c208"
-SPOTIFY_CLIENT_SECRET = "f8aa18b0e75d400e92e6642cc24d594a"
+# --- API Deezer (gratuite, sans authentification)
+DEEZER_API_BASE = "https://api.deezer.com"
 
-sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-    client_id=st.secrets["SPOTIFY_CLIENT_ID"],
-    client_secret=st.secrets["SPOTIFY_CLIENT_SECRET"]
-))
+
+def deezer_get(endpoint, params=None):
+    """Effectue un appel GET à l'API Deezer avec gestion du rate limiting."""
+    url = f"{DEEZER_API_BASE}/{endpoint}"
+    r = requests.get(url, params=params)
+    data = r.json()
+    # Gestion du rate limiting Deezer
+    if "error" in data and data["error"].get("code") == 4:
+        time.sleep(1)
+        r = requests.get(url, params=params)
+        data = r.json()
+    return data
+
+
+def deezer_get_all(endpoint, params=None):
+    """Récupère toutes les pages d'un endpoint Deezer paginé."""
+    if params is None:
+        params = {}
+    params["limit"] = 100
+    params["index"] = 0
+    all_items = []
+    while True:
+        data = deezer_get(endpoint, params)
+        items = data.get("data", [])
+        if not items:
+            break
+        all_items.extend(items)
+        if "next" not in data:
+            break
+        params["index"] += len(items)
+    return all_items
 
 
 # --- Fonctions utilitaires
-def ms_to_hhmmss(ms):
-    if ms is None:
+def seconds_to_hhmmss(seconds):
+    if seconds is None:
         return ""
-    total_seconds = ms // 1000
+    total_seconds = int(seconds)
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
+    secs = total_seconds % 60
     if hours > 0:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
+        return f"{hours}:{minutes:02d}:{secs:02d}"
     else:
-        return f"0:{minutes:02d}:{seconds:02d}"
+        return f"0:{minutes:02d}:{secs:02d}"
 
-def artist_data_is_main(artist_id, artist_list):
-    return artist_list and artist_list[0]["id"] == artist_id
+def artist_data_is_main(artist_id, contributors):
+    """Vérifie si l'artiste est le premier contributeur (artiste principal)."""
+    return contributors and contributors[0]["id"] == artist_id
 
 def get_artist_discography_export(artist_name=None, artist_id=None):
     """
@@ -55,28 +82,26 @@ def get_artist_discography_export(artist_name=None, artist_id=None):
     # --- Si on a un artist_id, on l'utilise directement
     if artist_id:
         try:
-            artist = sp.artist(artist_id)
+            artist = deezer_get(f"artist/{artist_id}")
+            if "error" in artist:
+                print(f"❌ ID Deezer invalide ou non trouvé : {artist_id}")
+                return None
         except Exception as e:
-            print(f"❌ ID Spotify invalide ou non trouvé : {artist_id}")
+            print(f"❌ ID Deezer invalide ou non trouvé : {artist_id}")
             return None
     else:
-        results = sp.search(q=f"artist:{artist_name}", type="artist", limit=1)
-        items = results.get("artists", {}).get("items", [])
+        results = deezer_get("search/artist", params={"q": artist_name, "limit": 1})
+        items = results.get("data", [])
         if not items:
             print(f"❌ Aucun artiste trouvé pour '{artist_name}'.")
             return None
         artist = items[0]
         artist_id = artist["id"]
 
-    print(f"🎵 Artiste trouvé : {artist['name']} (Spotify ID: {artist_id})")
+    print(f"🎵 Artiste trouvé : {artist['name']} (Deezer ID: {artist_id})")
 
     # --- Récupération de tous les albums de cet artiste
-    albums = []
-    results = sp.artist_albums(artist_id=artist_id, album_type="album,single,compilation,appears_on")
-    albums.extend(results["items"])
-    while results["next"]:
-        results = sp.next(results)
-        albums.extend(results["items"])
+    albums = deezer_get_all(f"artist/{artist_id}/albums")
 
     # --- Suppression des doublons
     seen = set()
@@ -91,37 +116,51 @@ def get_artist_discography_export(artist_name=None, artist_id=None):
     # --- Boucle sur tous les albums
     all_rows = []
     for i, album in enumerate(unique_albums, start=1):
-        print(f"→ Traitement {i}/{len(unique_albums)} : {album['name'][:50]}")
+        print(f"→ Traitement {i}/{len(unique_albums)} : {album.get('title', '')[:50]}")
 
         album_id = album["id"]
-        album_info = sp.album(album_id)
-        upc = str(album_info.get("external_ids", {}).get("upc"))
+        album_info = deezer_get(f"album/{album_id}")
+        if "error" in album_info:
+            continue
+        upc = str(album_info.get("upc", ""))
         release_date = album_info.get("release_date", "")
-        album_type = album_info.get("album_type", "")
+        album_type = album_info.get("record_type", "")
         label = album_info.get("label", "")
-        album_url = album_info.get("external_urls", {}).get("spotify", "")
+        album_url = album_info.get("link", "")
 
-        tracks = sp.album_tracks(album_id)
-        for track in tracks["items"]:
-            artist_ids = [a["id"] for a in track["artists"]]
-            artist_names = [a["name"] for a in track["artists"]]
+        tracks_data = deezer_get_all(f"album/{album_id}/tracks")
+        for track in tracks_data:
+            # Récupérer les contributeurs du track
+            contributors = track.get("contributors", [])
+            # Si pas de contributors dans le listing, on récupère le détail du track
+            if not contributors:
+                track_detail = deezer_get(f"track/{track['id']}")
+                if "error" in track_detail:
+                    continue
+                contributors = track_detail.get("contributors", [])
+            
+            artist_ids = [c["id"] for c in contributors]
+            artist_names = [c["name"] for c in contributors]
 
-            # Filtre strict : seulement les morceaux où l’artiste ID correspond exactement
+            # Filtre strict : seulement les morceaux où l'artiste ID correspond exactement
             if artist_id not in artist_ids:
                 continue
 
-            track_data = sp.track(track["id"])
-            duration = ms_to_hhmmss(track_data["duration_ms"])
-            isrc = track_data["external_ids"].get("isrc", "")
-            track_url = track_data.get("external_urls", {}).get("spotify", "")
-            role = "Main artist" if artist_data_is_main(artist_id, track["artists"]) else "Featured artist"
+            # Récupérer le détail du track pour ISRC et durée complète
+            track_data = deezer_get(f"track/{track['id']}")
+            if "error" in track_data:
+                continue
+            duration = seconds_to_hhmmss(track_data.get("duration"))
+            isrc = track_data.get("isrc", "")
+            track_url = track_data.get("link", "")
+            role = "Main artist" if artist_data_is_main(artist_id, contributors) else "Featured artist"
 
             all_rows.append({
                 'ARTIST NAME': "",
                 'ALIAS': artist["name"],  
                 'RELEASE ARTIST / GROUP': ", ".join(artist_names),
-                'ALBUM TITLE': album["name"],
-                'TRACK TITLE': track_data["name"],
+                'ALBUM TITLE': album_info.get("title", ""),
+                'TRACK TITLE': track_data.get("title", ""),
                 'Version': "",
                 'ISRC CODE': isrc,
                 'UPC': upc,
@@ -131,7 +170,7 @@ def get_artist_discography_export(artist_name=None, artist_id=None):
                 'YEAR OF RECORDING': release_date[:4] if release_date else "",
                 'COUNTRY OF RECORDING': "",
                 'RELEASE FORMAT': "",
-                'RELEASE TYPE': album_type.capitalize(),
+                'RELEASE TYPE': album_type.capitalize() if album_type else "",
                 'ROLE': role,
                 'INSTRUMENT(S) / VOCALS': "",
                 'PROOF (URL link)': track_url or album_url,
@@ -148,24 +187,27 @@ def get_artist_discography_export(artist_name=None, artist_id=None):
     return df
 
 # --- Interface utilisateur
-artist_name = st.text_input("Nom de l’artiste :")
-artist_id_input = st.text_input("Ou ID Spotify de l’artiste :", 
-                                placeholder="Ex : 5KQuLhckFhcox1K9UCgLuV")
+artist_name = st.text_input("Nom de l'artiste :")
+artist_id_input = st.text_input("Ou ID Deezer de l'artiste :", 
+                                placeholder="Ex : 27")
 
 if st.button("🎶 Rechercher et générer"):
     if not artist_name.strip() and not artist_id_input.strip():
-        st.warning("Merci de saisir un nom ou un ID Spotify d’artiste.")
+        st.warning("Merci de saisir un nom ou un ID Deezer d'artiste.")
     else:
-        with st.spinner("Recherche en cours sur Spotify..."):
+        with st.spinner("Recherche en cours sur Deezer..."):
             if artist_id_input.strip():
-                # 🔹 Si l'utilisateur donne un ID Spotify, on l'utilise directement
+                # 🔹 Si l'utilisateur donne un ID Deezer, on l'utilise directement
                 try:
-                    artist = sp.artist(artist_id_input.strip())
+                    artist = deezer_get(f"artist/{artist_id_input.strip()}")
+                    if "error" in artist:
+                        st.error("❌ ID Deezer invalide ou non trouvé.")
+                        st.stop()
                     artist_name = artist["name"]
                     st.info(f"🎵 Artiste trouvé via ID : **{artist_name}**")
-                    df = get_artist_discography_export(artist_id=artist_id_input.strip())
+                    df = get_artist_discography_export(artist_id=int(artist_id_input.strip()))
                 except Exception:
-                    st.error("❌ ID Spotify invalide ou non trouvé.")
+                    st.error("❌ ID Deezer invalide ou non trouvé.")
                     st.stop()
             else:
                 # 🔹 Sinon, recherche classique par nom
@@ -192,7 +234,7 @@ if st.button("🎶 Rechercher et générer"):
 st.subheader("🎡​Moulinette Droits Voisins")
 st.markdown("""
 Importer le répertoire source pour le convertir aux formats requis par:  
-**Spedidam**, **Playright**, **SwissPerf**, **SENA**, **AIE** et **Artisti**.
+**Spedidam**, **Playright**, **SwissPerf**, **SENA**, **AIE**, **Artisti** et **EJI**.
 """)
 
 # Upload du fichier Excel
@@ -204,14 +246,10 @@ if uploaded_file:
         df_source = pd.read_excel(uploaded_file, header=0)
         df_source["YEAR OF RECORDING"] = df_source["YEAR OF RECORDING"].astype("Int64").astype(str)
         
-        # 🔑 Paramètres API Spotify
-        SPOTIFY_CLIENT_ID = "ce1ba19136ac49f3a7a5bd678860c208"
-        SPOTIFY_CLIENT_SECRET = "f8aa18b0e75d400e92e6642cc24d594a"
-
         # 👉 Sélection des onglets à inclure
-        options = ["SPED", "Playright", "SwissPerf", "SENA", "AIE", "Artisti", "Artisti_2"]
+        options = ["SPED", "Playright", "SwissPerf", "SENA", "AIE", "Artisti", "Artisti_2", "EJI"]
         selected_tabs = st.multiselect(
-            "✅ Choisissez les onglets à inclure dans l’export :",
+            "✅ Choisissez les onglets à inclure dans l'export :",
             options,
             default=options,
             key="export_tabs"  # clé unique
@@ -257,7 +295,7 @@ if uploaded_file:
             if role == "FA":
                 return "yes"
 
-            # Vérifie si au moins un pseudo ou le nom de l’artiste est dans le nom du groupe
+            # Vérifie si au moins un pseudo ou le nom de l'artiste est dans le nom du groupe
             for p in pseudos + [rep]:
                 if p and p in main:
                     return "yes"
@@ -272,7 +310,7 @@ if uploaded_file:
         df_sped["Nom de l'artiste principal\nName of Main Artist"] = df_source["RELEASE ARTIST / GROUP"]
 
 
-        # 3️⃣ Nom du Groupe principal : seulement si ce n’est PAS un artiste principal
+        # 3️⃣ Nom du Groupe principal : seulement si ce n'est PAS un artiste principal
         df_sped["Nom du Groupe principal\nName of Main Group"] = df_source["RELEASE ARTIST / GROUP"].where(
             df_sped["Statut Artiste Principal\nMain artist\n(yes or no)"] == "no", ""
         )
@@ -285,7 +323,7 @@ if uploaded_file:
             artist = str(row.get("ARTIST NAME", "")).strip().lower()
             group = str(row.get("RELEASE ARTIST / GROUP", "")).strip().lower()
 
-            # Si ROLE n’est pas valide
+            # Si ROLE n'est pas valide
             if role not in ["FA", "NFA"]:
                 return ""
 
@@ -892,7 +930,7 @@ if uploaded_file:
         df_swissperf["Titre (morceau/chanson/plage)"] = df_source['TRACK TITLE']
 
         # Interprète principal/formation = Main artist / group
-        df_swissperf["Interprète principal/formation"] = df_source['RELEASE ARTIST / GROUP']
+        df_swissperf["Interprète principal/formation"] = df_source['RELEASE ARTIST / GROUP']
 
         # Instrument(s) = Instruments / Vocals
         df_swissperf["Instrument(s)"] = df_source['INSTRUMENT(S) / VOCALS']
@@ -925,7 +963,7 @@ if uploaded_file:
             return ""
 
         # Appliquer sur le DataFrame
-        df_swissperf["Rôle(s)\nFA/S, FA/CO, FA/MF\nou\nNFA/MS,  NFA/CS, NFA/MF\net/ou\nAP"] = df_source.apply(map_role_swissperf, axis=1)
+        df_swissperf["Rôle(s)\nFA/S, FA/CO, FA/MF\nou\nNFA/MS,  NFA/CS, NFA/MF\net/ou\nAP"] = df_source.apply(map_role_swissperf, axis=1)
 
 
 
@@ -935,7 +973,7 @@ if uploaded_file:
         df_swissperf["Pays d'enregistrement"] = df_source['COUNTRY OF RECORDING']
 
         # Année d'enre-gistre-ment
-        df_swissperf["Année d'enre-gistre-ment"] = df_source['YEAR OF RECORDING']
+        df_swissperf["Année d'enre-gistre-ment"] = df_source['YEAR OF RECORDING']
 
         # Pays de publication = Label country
         df_swissperf["Pays de publication"] = df_source['LABEL COUNTRY']
@@ -974,11 +1012,11 @@ if uploaded_file:
         # Réordonner les colonnes
         colonnes_swissperf = [
             'Titre (morceau/chanson/plage)',
-            'Interprète principal/formation',
+            'Interprète principal/formation',
             'Instrument(s)',
-            'Rôle(s)\nFA/S, FA/CO, FA/MF\nou\nNFA/MS,  NFA/CS, NFA/MF\net/ou\nAP',
+            'Rôle(s)\nFA/S, FA/CO, FA/MF\nou\nNFA/MS,  NFA/CS, NFA/MF\net/ou\nAP',
             'Pays d\'enregistrement',
-            'Année d\'enre-gistre-ment',
+            'Année d\'enre-gistre-ment',
             'Pays de publication',
             'Année de publica-tion',
             'Album',
@@ -1082,7 +1120,7 @@ if uploaded_file:
         # Colonne ROLE* : MA ou S
         def map_role_sena(row):
             role = str(row.get("ROLE", "")).strip().upper()
-            if role == "FA":
+            if role == "FA" or role == "Main artist" or role == "Featured artist":
                 return "MA"  # Main Artist
             elif role == "NFA":
                 return "S"   # Session / Supporting
@@ -1315,7 +1353,7 @@ if uploaded_file:
 
         df_artisti["Label"] = df_source["LABEL NAME"]
         df_artisti["Media Type"] = df_source["RELEASE FORMAT"]
-        df_artisti[" UPC Number"] = df_source["UPC"]
+        df_artisti[" UPC Number"] = df_source["UPC"].astype("string")
         df_artisti["Catalog Number"] = ""  # pas dans df_source
         df_artisti["Genre"] = df_source["RELEASE TYPE"]
         df_artisti["Track Duration "] = df_source["Duration"]
@@ -1358,8 +1396,8 @@ if uploaded_file:
         df_artisti_2["Track Main Artist"] = df_source["ARTIST NAME"]
         df_artisti_2["ISRC"] = df_source["ISRC CODE"]
         df_artisti_2["Agent Track ID"] = ""  # Si tu as un ID interne, tu peux le mettre ici
-        df_artisti_2["Performer First Name"] = df_source["ARTIST NAME"].apply(lambda x: str(x).split()[0] if pd.notnull(x) and str(x).strip() else "")
-        df_artisti_2["Performer Last Name"] = df_source["ARTIST NAME"].apply(lambda x: " ".join(str(x).split()[1:]) if pd.notnull(x) and str(x).strip() else "")
+        df_artisti_2["Performer First Name"] = df_source["ARTIST NAME"].apply(lambda x: str(x).split()[0] if pd.notnull(x) and str(x).strip() and str(x).strip().lower() != "nan" else "")
+        df_artisti_2["Performer Last Name"] = df_source["ARTIST NAME"].apply(lambda x: " ".join(str(x).split()[1:]) if pd.notnull(x) and str(x).strip() and str(x).strip().lower() != "nan" else "")
         df_artisti_2["Performer Date Of Birth"] = ""  # pas dans df_source
         df_artisti_2["Performer IPN"] = ""  # pas dans df_source
         df_artisti_2["Performer Citizenship"] = ""
@@ -1399,6 +1437,47 @@ if uploaded_file:
 
         df_artisti_2 = df_artisti_2[artisti_cols_2]
 
+        #EJI
+
+        df_eji = pd.DataFrame()
+
+        df_eji['Title of the track'] = df_source['TRACK TITLE']
+        df_eji['Title of the album'] = df_source['ALBUM TITLE']
+        df_eji['Name of the main artist or band under whose name this track was released'] = df_source['RELEASE ARTIST / GROUP']
+
+        # Soliste ou membre de groupe - même logique que is_main_artist_partial
+        def is_soloist(row):
+            main = str(row.get('RELEASE ARTIST / GROUP', '')).strip().lower()
+            pseudos = [p.strip().lower() for p in str(row.get('ALIAS', '')).split(';') if p.strip()]
+            rep = str(row.get('ARTIST NAME', '')).strip().lower()
+            if any(p and p in main for p in pseudos + [rep]):
+                return 'soloist'
+            return 'band member'
+
+        df_eji['Mark here if you were a soloist or a band member on this track'] = df_source.apply(is_soloist, axis=1)
+        df_eji['Number of band members'] = ''
+        # Type de contribution selon les instruments/voix
+        vocal_keywords = ['vocal', 'singer', 'soprano', 'alto', 'tenor', 'baritone',
+                        'mezzo', 'falsetto', 'rap', 'yodel', 'whistling', 'contralto']
+        
+        df_eji['conductor / choir leader'] = df_source['INSTRUMENT(S) / VOCALS'].apply(
+            lambda x: 'X' if pd.notnull(x) and 'conductor' in str(x).lower() else ''
+        )
+        df_eji['instrumentalist'] = df_source['INSTRUMENT(S) / VOCALS'].apply(
+            lambda x: 'X' if pd.notnull(x) and not any(k in str(x).lower() for k in vocal_keywords + ['spoken word']) else ''
+        )
+        df_eji['singer'] = df_source['INSTRUMENT(S) / VOCALS'].apply(
+            lambda x: 'X' if pd.notnull(x) and any(k in str(x).lower() for k in vocal_keywords) else ''
+        )
+        df_eji['speaker / reader / vocal artist '] = df_source['INSTRUMENT(S) / VOCALS'].apply(
+            lambda x: 'X' if pd.notnull(x) and 'spoken word' in str(x).lower() else ''
+        )
+        df_eji['Record label'] = df_source['LABEL NAME']
+
+        df_eji['Year of release'] = df_source['YEAR OF RECORDING']
+
+        df_eji['ISRC'] = df_source['ISRC CODE']
+
 
         # ------------------------- EXPORT EXCEL -------------------------
         output = io.BytesIO()
@@ -1417,6 +1496,8 @@ if uploaded_file:
                 df_artisti.to_excel(writer, sheet_name="Artisti", index=False)
             if "Artisti_2" in selected_tabs:
                 df_artisti_2.to_excel(writer, sheet_name="Artisti_2", index=False)
+            if "EJI" in selected_tabs:
+                df_eji.to_excel(writer, sheet_name="EJI", index=False)
 
         st.download_button(
         label="⬇️ Télécharger le fichier Excel",
